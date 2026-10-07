@@ -85,8 +85,9 @@ def vector_search(query: SearchQuery):
     with get_db_connection() as conn:
         register_vector(conn)
         with conn.cursor() as cur:
+            # THE FIX: Cast the %s placeholder explicitly to ::vector
             cur.execute("""
-                SELECT id, content, embedding <-> %s AS distance
+                SELECT id, content, embedding <-> %s::vector AS distance
                 FROM cloud_documents
                 ORDER BY distance ASC
                 LIMIT %s;
