@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from pgvector.psycopg2 import register_vector
+from contextlib import asynccontextmanager
 
 # Load environment variables
 load_dotenv()
@@ -13,8 +14,6 @@ PORT = int(os.getenv("PORT", 8000))
 
 if not DB_URL:
     raise RuntimeError("DATABASE_URL environment variable is missing.")
-
-app = FastAPI(title="Cloud pgvector RAG API")
 
 # --- DATABASE SETUP ---
 def get_db_connection():
@@ -25,16 +24,11 @@ def get_db_connection():
 
 def initialize_database():
     """Injects the vector extension and creates the RAG table on cloud boot."""
+    print("[SYSTEM] Waking up Neon database...")
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            # 1. Enable pgvector extension on the cloud database
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-            
-            # 2. Register pgvector type with psycopg2
             register_vector(conn)
-            
-            # 3. Create the documents table. We use vector(3) for this architectural test.
-            # In a real Bedrock/OpenAI deployment, this would be vector(1536) or vector(1024).
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS cloud_documents (
                     id SERIAL PRIMARY KEY,
@@ -44,16 +38,26 @@ def initialize_database():
             """)
             print("[SYSTEM] Cloud pgvector database initialized successfully.")
 
-# Run initialization immediately on startup
-initialize_database()
+# --- LIFESPAN MANAGER ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # This runs immediately AFTER Uvicorn binds the port, preventing Render timeouts.
+    try:
+        initialize_database()
+    except Exception as e:
+        print(f"[ERROR] Database initialization failed: {e}")
+    yield
+    # Anything here runs on server shutdown
+
+app = FastAPI(title="Cloud pgvector RAG API", lifespan=lifespan)
 
 # --- API MODELS ---
 class DocumentPayload(BaseModel):
     content: str
-    embedding: list[float]  # Must be exactly 3 floats for this test
+    embedding: list[float]  
 
 class SearchQuery(BaseModel):
-    embedding: list[float]  # Must be exactly 3 floats
+    embedding: list[float]  
     top_k: int = 2
 
 # --- API ROUTES ---
@@ -63,7 +67,6 @@ def ingest_document(payload: DocumentPayload):
         raise HTTPException(status_code=400, detail="Embedding must be 3 dimensions.")
     
     with get_db_connection() as conn:
-        # Register vector type per connection
         register_vector(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -82,7 +85,6 @@ def vector_search(query: SearchQuery):
     with get_db_connection() as conn:
         register_vector(conn)
         with conn.cursor() as cur:
-            # The <-> operator computes Euclidean distance in pgvector
             cur.execute("""
                 SELECT id, content, embedding <-> %s AS distance
                 FROM cloud_documents
@@ -101,5 +103,4 @@ def vector_search(query: SearchQuery):
     }
 
 if __name__ == "__main__":
-    # Runs locally out-of-the-box. Docker will override this with the CMD in the Dockerfile.
     uvicorn.run("project_100code1:app", host="0.0.0.0", port=PORT, reload=True)
